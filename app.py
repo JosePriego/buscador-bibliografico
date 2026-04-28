@@ -9,9 +9,9 @@ import pandas as pd
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="AcademiGraph Pro | Expert Search", 
+    page_title="AcademiGraph Pro | Expert Total", 
     layout="wide", 
-    page_icon="🔍"
+    page_icon="🌍"
 )
 
 # --- ESTILOS ---
@@ -26,12 +26,12 @@ st.markdown("""
 # --- FUNCIÓN DE ENRIQUECIMIENTO DE CITAS ---
 
 def enriquecer_citas(articulo):
+    """Busca el conteo de citas real en Semantic Scholar si la fuente original no lo da."""
     if articulo.get("Citas") and articulo["Citas"] > 0:
         return articulo
     try:
         doi = articulo.get("DOI")
         titulo = articulo.get("Título")
-        # Priorizamos DOI para exactitud
         url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1&fields=citationCount"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
@@ -45,7 +45,7 @@ def enriquecer_citas(articulo):
     except: pass
     return articulo
 
-# --- 1. MOTORES DE BÚSQUEDA CON FILTROS ESPECÍFICOS ---
+# --- 1. MOTORES DE BÚSQUEDA ---
 
 def buscar_federado_global(materia, limite, email, perfil, campo):
     resultados = []
@@ -54,14 +54,10 @@ def buscar_federado_global(materia, limite, email, perfil, campo):
     def buscar_oa():
         try:
             params = {"per-page": limite, "mailto": email, "sort": "cited_by_count:desc"}
-            if campo == "Título":
-                params["filter"] = f"title.search:{materia}"
-            elif campo == "Autor":
-                params["filter"] = f"authorships.author.display_name.search:{materia}"
-            else:
-                params["search"] = materia
-                if perfil == "Derecho/Economía":
-                    params["search"] = f"{materia} (law OR economics OR business)"
+            if campo == "Título": params["filter"] = f"title.search:{materia}"
+            elif campo == "Autor": params["filter"] = f"authorships.author.display_name.search:{materia}"
+            else: 
+                params["search"] = f"{materia} (law OR economics OR business)" if perfil == "Derecho/Economía" else materia
 
             res = requests.get("https://api.openalex.org/works", params=params, timeout=15)
             if res.status_code == 200:
@@ -79,11 +75,8 @@ def buscar_federado_global(materia, limite, email, perfil, campo):
     def buscar_pubmed():
         if perfil == "Derecho/Economía": return
         try:
-            # Construir query de PubMed según campo
-            if campo == "Título": q_pubmed = f"{materia}[ti]"
-            elif campo == "Autor": q_pubmed = f"{materia}[au]"
-            else: q_pubmed = materia
-
+            tag = "[ti]" if campo == "Título" else "[au]" if campo == "Autor" else ""
+            q_pubmed = f"{materia}{tag}"
             base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
             s_res = requests.get(f"{base_url}esearch.fcgi", params={"db": "pubmed", "term": q_pubmed, "retmax": limite, "retmode": "json"}, timeout=10)
             ids = s_res.json().get("esearchresult", {}).get("idlist", [])
@@ -105,10 +98,7 @@ def buscar_federado_global(materia, limite, email, perfil, campo):
     # MOTOR 3: CORE
     def buscar_core():
         try:
-            if campo == "Título": q_core = f"title:({materia})"
-            elif campo == "Autor": q_core = f"authors:({materia})"
-            else: q_core = materia
-
+            q_core = f"title:({materia})" if campo == "Título" else f"authors:({materia})" if campo == "Autor" else materia
             res = requests.get(f"https://api.core.ac.uk/v3/search/works", params={"q": q_core, "limit": limite}, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("results", []):
@@ -125,8 +115,7 @@ def buscar_federado_global(materia, limite, email, perfil, campo):
             params = {"rows": limite, "mailto": email, "sort": "is-referenced-by-count", "order": "desc"}
             if campo == "Título": params["query.title"] = materia
             elif campo == "Autor": params["query.author"] = materia
-            else: 
-                params["query"] = f"{materia} RePEc SSR" if perfil == "Derecho/Economía" else materia
+            else: params["query"] = f"{materia} RePEc SSRN" if perfil == "Derecho/Economía" else materia
 
             res = requests.get("https://api.crossref.org/works", params=params, timeout=15)
             if res.status_code == 200:
@@ -143,7 +132,6 @@ def buscar_federado_global(materia, limite, email, perfil, campo):
         executor.submit(buscar_pubmed)
         executor.submit(buscar_core)
         executor.submit(buscar_cr)
-        
     return resultados
 
 # --- 2. MOTOR DE RED ---
@@ -161,7 +149,6 @@ def obtener_red_cached(doi, titulo, limite_red=5):
                 r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", params={"limit": limite_red, "fields": "title"}, timeout=10)
                 if r_res.status_code == 200:
                     refs = [i['citedPaper']['title'] for i in r_res.json().get('data', []) if i.get('citedPaper')]
-                
                 c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", params={"limit": limite_red, "fields": "title"}, timeout=10)
                 if c_res.status_code == 200:
                     cits = [i['citingPaper']['title'] for i in c_res.json().get('data', []) if i.get('citingPaper')]
@@ -170,32 +157,34 @@ def obtener_red_cached(doi, titulo, limite_red=5):
 
 # --- 3. INTERFAZ ---
 
-st.title("🌍 AcademiGraph Pro: Expert Intelligence")
+st.title("🌍 AcademiGraph Pro: Global Research Intelligence")
 
 with st.sidebar:
-    st.header("⚙️ Filtros Avanzados")
+    st.header("⚙️ Configuración")
+    # LOS DESPLEGABLES QUE FALTABAN:
     campo_busqueda = st.selectbox("Buscar por:", ["Palabras Clave", "Título", "Autor"])
-    perfil = st.selectbox("Perfil de Especialidad", ["General", "Derecho/Economía"])
+    perfil = st.selectbox("Perfil de Especialidad:", ["General", "Derecho/Economía"])
+    
     user_email = st.text_input("Email (Polite Pool)", "investigador@institucion.edu")
     n_results = st.slider("Resultados por motor", 5, 25, 10)
     st.divider()
-    st.caption("Filtros específicos activados para PubMed, Dimensions y Crossref.")
+    st.info("📊 PubMed y CORE enriquecidos con métricas de impacto reales.")
 
-query = st.text_input(f"Introduce el {campo_busqueda.lower()}:", placeholder="Ej: Albert Einstein o Quantum Computing")
+query = st.text_input(f"Introduce el {campo_busqueda.lower()}:", placeholder="Ej: Graphene o Albert Einstein")
 
-if st.button("🚀 Ejecutar Investigación"):
+if st.button("🚀 Lanzar Investigación"):
     if query:
-        with st.status(f"Buscando '{query}' en campo {campo_busqueda}...", expanded=True) as s:
-            # FASE 1: BÚSQUEDA
+        with st.status(f"Analizando '{query}' vía {campo_busqueda}...", expanded=True) as s:
+            # BÚSQUEDA
             data_raw = buscar_federado_global(query, n_results, user_email, perfil, campo_busqueda)
             data_raw = [d for d in data_raw if d['Título']]
             
-            # FASE 2: ENRIQUECIMIENTO
-            s.write("Cruzando métricas de impacto...")
+            # ENRIQUECIMIENTO
+            s.write("Sincronizando métricas de impacto global...")
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 data_base = list(executor.map(enriquecer_citas, data_raw))
             
-            # FASE 3: RED
+            # MAPEO
             s.write("Mapeando ecosistema bibliométrico...")
             grafo = nx.DiGraph()
             progreso = st.progress(0)
@@ -209,16 +198,13 @@ if st.button("🚀 Ejecutar Investigación"):
                 for c in c_list:
                     grafo.add_node(c, color='#2196F3', size=15)
                     grafo.add_edge(c, art['Título'], color='#2196F3')
-                
                 progreso.progress((i + 1) / len(data_base))
                 time.sleep(1.2)
+            s.update(label="¡Procesamiento completo!", state="complete")
 
-            s.update(label="¡Investigación finalizada!", state="complete")
-
-        # UI Visualización
+        # UI
         col_m, col_d = st.columns([2, 1])
         with col_m:
-            st.markdown(f"### 🕸️ Mapa de Impacto ({campo_busqueda})")
             net = Network(height="750px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
             net.from_nx(grafo)
             net.toggle_physics(True)
@@ -226,12 +212,12 @@ if st.button("🚀 Ejecutar Investigación"):
             components.html(net.generate_html(), height=800)
 
         with col_d:
-            st.markdown("### 📊 Datos Detallados")
+            st.markdown("### 📊 Ranking de Resultados")
             df = pd.DataFrame(data_base)
             if not df.empty:
                 df["Citas"] = pd.to_numeric(df["Citas"], errors='coerce').fillna(0).astype(int)
                 df_sorted = df.sort_values(by="Citas", ascending=False)
                 st.dataframe(df_sorted, use_container_width=True)
-                st.download_button("📥 Descargar Reporte", df_sorted.to_csv(index=False).encode('utf-8'), "data_expert.csv")
+                st.download_button("📥 Descargar Reporte CSV", df_sorted.to_csv(index=False).encode('utf-8'), "reporte_total.csv")
     else:
-        st.warning("Por favor, introduce un término de búsqueda.")
+        st.warning("Introduce un término para investigar.")
