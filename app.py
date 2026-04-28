@@ -6,60 +6,104 @@ from pyvis.network import Network
 import streamlit.components.v1 as components
 import time
 import pandas as pd
-import unicodedata
-import re
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="AcademiGraph Pro | High Recovery", layout="wide", page_icon="🚀")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(
+    page_title="AcademiGraph Pro | Recovery Edition", 
+    layout="wide", 
+    page_icon="🎓"
+)
 
-def normalizar_simple(texto):
-    if not texto: return ""
-    return " ".join(texto.lower().split())
+# --- ESTILOS VISUALES ---
+st.markdown("""
+    <style>
+    .stApp { background-color: #0e1117; color: #ffffff; }
+    .stButton>button { width: 100%; border-radius: 8px; background-color: #2e7bcf; color: white; font-weight: bold; }
+    .stDownloadButton>button { width: 100%; border-radius: 8px; background-color: #1c83e1; color: white; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- ENRIQUECIMIENTO ---
-def enriquecer_citas_flexible(articulo):
+# --- FUNCIÓN DE ENRIQUECIMIENTO DE CITAS (VERSIÓN ORIGINAL) ---
+
+def enriquecer_citas(articulo):
     if articulo.get("Citas") and articulo["Citas"] > 0:
         return articulo
     try:
         doi = articulo.get("DOI")
-        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={articulo['Título']}&limit=1&fields=citationCount"
+        titulo = articulo.get("Título")
+        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1&fields=citationCount"
         res = requests.get(url, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            articulo["Citas"] = data.get("citationCount") if doi else data.get("data", [{}])[0].get("citationCount", 0)
+            if doi:
+                articulo["Citas"] = data.get("citationCount", 0)
+            else:
+                results = data.get("data", [])
+                if results:
+                    articulo["Citas"] = results[0].get("citationCount", 0)
     except: pass
     return articulo
 
-# --- MOTORES (RECUPERANDO CORE Y PUBMED) ---
-def buscar_federado_recuperacion(materia, limite, email, perfil, campo):
+# --- 1. MOTORES DE BÚSQUEDA (VERSIÓN RECUPERADA) ---
+
+def buscar_federado_global(materia, limite, email, perfil, campo):
     resultados = []
     
+    # MOTOR 1: OPENALEX
     def buscar_oa():
         try:
-            p = {"per-page": limite, "mailto": email, "sort": "cited_by_count:desc"}
-            if campo == "ORCID": p["filter"] = f"author.orcid:https://orcid.org/{materia}"
-            elif campo == "Título": p["filter"] = f"title.search:{materia}"
-            elif campo == "Autor (Nombre)": p["filter"] = f"authorships.author.display_name.search:{materia}"
-            else: p["search"] = f"{materia} (law OR economics OR business)" if perfil == "Derecho/Economía" else materia
-            
-            res = requests.get("https://api.openalex.org/works", params=p, timeout=15)
+            params = {"per-page": limite, "mailto": email, "sort": "cited_by_count:desc"}
+            if campo == "ORCID": params["filter"] = f"author.orcid:https://orcid.org/{materia}"
+            elif campo == "Título": params["filter"] = f"title.search:{materia}"
+            elif campo == "Autor (Nombre)": params["filter"] = f"authorships.author.display_name.search:{materia}"
+            else: 
+                params["search"] = f"{materia} (law OR economics OR business)" if perfil == "Derecho/Economía" else materia
+
+            res = requests.get("https://api.openalex.org/works", params=params, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("results", []):
+                    doi_url = item.get("doi")
                     resultados.append({
-                        "Fuente": "Dimensions/OA", "Título": item.get("title"),
+                        "Fuente": "Dimensions (via OA)", "Título": item.get("title"),
                         "Autor": item.get("authorships", [{}])[0].get("author", {}).get("display_name", "N/A"),
-                        "DOI": item.get("doi", "").replace("https://doi.org/", ""), "Citas": int(item.get("cited_by_count", 0))
+                        "DOI": doi_url.replace("https://doi.org/", "") if doi_url else None,
+                        "Citas": int(item.get("cited_by_count", 0))
                     })
         except: pass
 
+    # MOTOR 2: PUBMED
+    def buscar_pubmed():
+        if perfil == "Derecho/Economía": return
+        try:
+            tag = "[auid]" if campo == "ORCID" else "[ti]" if campo == "Título" else "[au]" if campo == "Autor (Nombre)" else ""
+            q_pubmed = f"{materia}{tag}"
+            res = requests.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi", 
+                               params={"db": "pubmed", "term": q_pubmed, "retmax": limite, "retmode": "json"}, timeout=10)
+            ids = res.json().get("esearchresult", {}).get("idlist", [])
+            if ids:
+                res_sum = requests.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi", params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"}, timeout=10)
+                summaries = res_sum.json().get("result", {})
+                for uid in ids:
+                    if uid == "uids": continue
+                    paper = summaries.get(uid, {})
+                    resultados.append({
+                        "Fuente": "PubMed", "Título": paper.get("title", "N/A"),
+                        "Autor": paper.get("authors", [{}])[0].get("name", "N/A") if paper.get("authors") else "N/A",
+                        "DOI": paper.get("elocationid", "").replace("doi: ", "") if "doi:" in paper.get("elocationid", "") else None,
+                        "Citas": 0
+                    })
+        except: pass
+
+    # MOTOR 3: CROSSREF
     def buscar_cr():
         try:
-            p = {"rows": limite, "sort": "is-referenced-by-count", "order": "desc"}
-            if campo == "ORCID": p["filter"] = f"orcid:{materia}"
-            elif campo == "Título": p["query.title"] = materia
-            elif campo == "Autor (Nombre)": p["query.author"] = materia
-            else: p["query"] = materia
-            res = requests.get("https://api.crossref.org/works", params=p, timeout=15)
+            params = {"rows": limite, "mailto": email, "sort": "is-referenced-by-count", "order": "desc"}
+            if campo == "ORCID": params["filter"] = f"orcid:{materia}"
+            elif campo == "Título": params["query.title"] = materia
+            elif campo == "Autor (Nombre)": params["query.author"] = materia
+            else: params["query"] = materia
+
+            res = requests.get("https://api.crossref.org/works", params=params, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("message", {}).get("items", []):
                     resultados.append({
@@ -69,73 +113,107 @@ def buscar_federado_recuperacion(materia, limite, email, perfil, campo):
                     })
         except: pass
 
+    # MOTOR 4: CORE
     def buscar_core():
         try:
-            q = f"authors:({materia})" if campo in ["Autor (Nombre)", "ORCID"] else f"title:({materia})" if campo == "Título" else materia
-            res = requests.get("https://api.core.ac.uk/v3/search/works", params={"q": q, "limit": limite}, timeout=15)
+            q_core = f"authors:({materia})" if campo in ["Autor (Nombre)", "ORCID"] else f"title:({materia})" if campo == "Título" else materia
+            res = requests.get(f"https://api.core.ac.uk/v3/search/works", params={"q": q_core, "limit": limite}, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("results", []):
-                    resultados.append({"Fuente": "CORE", "Título": item.get("title"), "Autor": "N/A", "DOI": item.get("doi"), "Citas": 0})
+                    resultados.append({
+                        "Fuente": "CORE", "Título": item.get("title"),
+                        "Autor": item.get("authors", [{}])[0].get("name", "N/A") if item.get("authors") else "N/A",
+                        "DOI": item.get("doi"), "Citas": 0
+                    })
         except: pass
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         executor.submit(buscar_oa)
+        executor.submit(buscar_pubmed)
         executor.submit(buscar_cr)
         executor.submit(buscar_core)
-        if perfil == "General":
-            # Aquí iría la función de PubMed similar a las anteriores
-            pass
-            
     return resultados
 
-# --- RED ---
+# --- 2. MOTOR DE RED (ESTABLE) ---
+
 @st.cache_data(ttl=3600)
-def obtener_red(doi, titulo):
+def obtener_red_cached(doi, titulo, limite_red=5):
     refs, cits = [], []
     try:
         url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1"
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, timeout=12)
         if res.status_code == 200:
             data = res.json()
-            pid = data.get("paperId") if doi else data.get("data", [{}])[0].get("paperId")
-            if pid:
-                r = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{pid}/references", params={"limit": 5, "fields": "title"}).json()
-                refs = [i['citedPaper']['title'] for i in r.get('data', []) if i.get('citedPaper')]
-                c = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{pid}/citations", params={"limit": 5, "fields": "title"}).json()
-                cits = [i['citingPaper']['title'] for i in c.get('data', []) if i.get('citingPaper')]
+            p_id = data.get("paperId") if doi else data.get("data", [{}])[0].get("paperId")
+            if p_id:
+                r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", params={"limit": limite_red, "fields": "title"}, timeout=10)
+                refs = [i['citedPaper']['title'] for i in r_res.json().get('data', []) if i.get('citedPaper')]
+                c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", params={"limit": limite_red, "fields": "title"}, timeout=10)
+                cits = [i['citingPaper']['title'] for i in c_res.json().get('data', []) if i.get('citingPaper')]
     except: pass
     return refs, cits
 
-# --- INTERFAZ ---
-st.title("🚀 AcademiGraph Pro: Recuperación de Volumen")
+# --- 3. INTERFAZ ---
+
+st.title("🎓 AcademiGraph Pro: Recuperación Total")
 
 with st.sidebar:
-    campo = st.selectbox("Buscar por:", ["Palabras Clave", "Título", "Autor (Nombre)", "ORCID"])
-    perfil = st.selectbox("Perfil:", ["General", "Derecho/Economía"])
-    n_res = st.slider("Resultados por motor", 5, 25, 15)
+    st.header("⚙️ Filtros")
+    campo_busqueda = st.selectbox("Buscar por:", ["Palabras Clave", "Título", "Autor (Nombre)", "ORCID"])
+    perfil = st.selectbox("Perfil de Especialidad:", ["General", "Derecho/Economía"])
+    user_email = st.text_input("Email (Polite Pool)", "investigador@institucion.edu")
+    n_results = st.slider("Resultados por motor", 5, 25, 15)
+    st.divider()
+    st.info("💡 Hemos vuelto a la versión de búsqueda amplia para asegurar el máximo de resultados.")
 
-query = st.text_input(f"Introduce {campo}:")
+query = st.text_input(f"Introduce el {campo_busqueda}:")
 
-if st.button("🚀 Investigar"):
+if st.button("🚀 Iniciar Gran Búsqueda"):
     if query:
-        with st.status("Buscando...") as s:
-            data_raw = buscar_federado_recuperacion(query, n_res, "test@test.com", perfil, campo)
+        with st.status("Consultando repositorios globales...", expanded=True) as s:
+            # FASE 1: BÚSQUEDA AMPLIA
+            data_raw = buscar_federado_global(query, n_results, user_email, perfil, campo_busqueda)
+            data_raw = [d for d in data_raw if d['Título']]
+            
+            # FASE 2: ENRIQUECIMIENTO (Sin filtros restrictivos)
+            s.write("Sincronizando métricas de impacto...")
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                data_base = list(executor.map(enriquecer_citas_flexible, data_raw))
+                data_base = list(executor.map(enriquecer_citas, data_raw))
             
+            # FASE 3: RED
+            s.write("Mapeando conexiones bibliométricas...")
             grafo = nx.DiGraph()
-            for art in data_base:
-                r, c = obtener_red(art['DOI'], art['Título'])
-                grafo.add_node(art['Título'], color='#4CAF50', size=25)
-                for x in r: grafo.add_edge(art['Título'], x)
-                for x in c: grafo.add_edge(x, art['Título'])
-                time.sleep(0.5)
-            s.update(label="Listo", state="complete")
+            progreso = st.progress(0)
             
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            net = Network(height="600px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
+            for i, art in enumerate(data_base):
+                r_list, c_list = obtener_red_cached(art['DOI'], art['Título'])
+                grafo.add_node(art['Título'], color='#4CAF50', size=30)
+                for r in r_list:
+                    grafo.add_node(r, color='#FF5722', size=15)
+                    grafo.add_edge(art['Título'], r, color='#FF5722')
+                for c in c_list:
+                    grafo.add_node(c, color='#2196F3', size=15)
+                    grafo.add_edge(c, art['Título'], color='#2196F3')
+                progreso.progress((i + 1) / len(data_base))
+                time.sleep(1.1)
+            s.update(label="¡Procesamiento completo!", state="complete")
+
+        # UI Visualización
+        col_m, col_d = st.columns([2, 1])
+        with col_m:
+            net = Network(height="750px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
             net.from_nx(grafo)
-            components.html(net.generate_html(), height=650)
-        with col2:
-            st.dataframe(pd.DataFrame(data_base))
+            net.toggle_physics(True)
+            net.repulsion(node_distance=180)
+            components.html(net.generate_html(), height=800)
+
+        with col_d:
+            st.markdown("### 📊 Datos Recuperados")
+            df = pd.DataFrame(data_base)
+            if not df.empty:
+                df["Citas"] = pd.to_numeric(df["Citas"], errors='coerce').fillna(0).astype(int)
+                df_sorted = df.sort_values(by="Citas", ascending=False)
+                st.dataframe(df_sorted, use_container_width=True)
+                st.download_button("📥 Descargar Reporte CSV", df_sorted.to_csv(index=False).encode('utf-8'), "reporte_total.csv")
+    else:
+        st.warning("Introduce un término de búsqueda.")
