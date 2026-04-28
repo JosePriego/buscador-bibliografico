@@ -9,9 +9,9 @@ import pandas as pd
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="AcademiGraph Pro | High-Volume Search", 
+    page_title="AcademiGraph Pro | Búsqueda global", 
     layout="wide", 
-    page_icon="🚀"
+    page_icon="🌍"
 )
 
 # --- ESTILOS ---
@@ -23,11 +23,12 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. MOTORES DE BÚSQUEDA FEDERADOS ---
+# --- 1. MOTORES DE BÚSQUEDA INTERNACIONALES ---
 
-def buscar_federado_total(materia, limite, email, perfil):
+def buscar_federado_global(materia, limite, email):
     resultados = []
     
+    # MOTOR 1: OPENALEX (Datos de impacto de Dimensions)
     def buscar_oa():
         try:
             res = requests.get("https://api.openalex.org/works", 
@@ -36,13 +37,37 @@ def buscar_federado_total(materia, limite, email, perfil):
                 for item in res.json().get("results", []):
                     doi_url = item.get("doi")
                     resultados.append({
-                        "Fuente": "OpenAlex/Dimensions", "Título": item.get("title"),
+                        "Fuente": "Dimensions (via OA)", 
+                        "Título": item.get("title"),
                         "Autor": item.get("authorships", [{}])[0].get("author", {}).get("display_name", "N/A"),
                         "DOI": doi_url.replace("https://doi.org/", "") if doi_url else None,
                         "Citas": int(item.get("cited_by_count", 0))
                     })
         except: pass
 
+    # MOTOR 2: PUBMED (Biomedicina)
+    def buscar_pubmed():
+        try:
+            base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+            s_res = requests.get(f"{base_url}esearch.fcgi", params={"db": "pubmed", "term": materia, "retmax": limite, "retmode": "json"}, timeout=15)
+            ids = s_res.json().get("esearchresult", {}).get("idlist", [])
+            if ids:
+                f_res = requests.get(f"{base_url}esummary.fcgi", params={"db": "pubmed", "id": ",".join(ids), "retmode": "json"}, timeout=15)
+                summaries = f_res.json().get("result", {})
+                for uid in ids:
+                    if uid == "uids": continue
+                    paper = summaries.get(uid, {})
+                    # PubMed a veces devuelve el DOI en el campo elocationid
+                    eloc = paper.get("elocationid", "")
+                    doi = eloc.replace("doi: ", "") if "doi:" in eloc else None
+                    resultados.append({
+                        "Fuente": "PubMed", "Título": paper.get("title", "N/A"),
+                        "Autor": paper.get("authors", [{}])[0].get("name", "N/A") if paper.get("authors") else "N/A",
+                        "DOI": doi, "Citas": 0
+                    })
+        except: pass
+
+    # MOTOR 3: CORE (Open Access masivo)
     def buscar_core():
         try:
             res = requests.get(f"https://api.core.ac.uk/v3/search/works", params={"q": materia, "limit": limite}, timeout=20)
@@ -55,6 +80,7 @@ def buscar_federado_total(materia, limite, email, perfil):
                     })
         except: pass
 
+    # MOTOR 4: CROSSREF (Impacto DOI)
     def buscar_cr():
         try:
             res = requests.get("https://api.crossref.org/works", 
@@ -68,47 +94,35 @@ def buscar_federado_total(materia, limite, email, perfil):
                     })
         except: pass
 
-    def buscar_uco():
-        try:
-            url = "https://mezquita.uco.es/primaws/rest/pub/pnxs"
-            params = {"q": f"any,contains,{materia}", "limit": limite, "vid": "34CBUA_UCO:VU1", "tab": "Everything", "scope": "MyInst_and_CI", "inst": "34CBUA_UCO"}
-            res = requests.get(url, params=params, timeout=20)
-            if res.status_code == 200:
-                for item in res.json().get("docs", []):
-                    pnx = item.get("pnx", {})
-                    disp = pnx.get("display", {})
-                    resultados.append({
-                        "Fuente": "UCO", "Título": disp.get("title", [""])[0],
-                        "Autor": disp.get("creator", ["N/A"])[0], 
-                        "DOI": pnx.get("addata", {}).get("doi", [None])[0], "Citas": 0
-                    })
-        except: pass
-
+    # Paralelización de motores
     with concurrent.futures.ThreadPoolExecutor() as executor:
         executor.submit(buscar_oa)
+        executor.submit(buscar_pubmed)
         executor.submit(buscar_core)
         executor.submit(buscar_cr)
-        executor.submit(buscar_uco)
         
     return resultados
 
-# --- 2. MOTOR DE RED CON CACHÉ ---
+# --- 2. MOTOR DE RED ---
 
-@st.cache_data(ttl=3600) # Caché de 1 hora para no repetir peticiones idénticas
+@st.cache_data(ttl=3600)
 def obtener_red_cached(doi, titulo, limite_red=5):
     refs, cits = [], []
+    if not doi and not titulo: return [], []
     try:
+        # Identificación
         url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1"
-        res = requests.get(url, timeout=15)
+        res = requests.get(url, timeout=12)
         if res.status_code == 200:
             data = res.json()
             p_id = data.get("paperId") if doi else data.get("data", [{}])[0].get("paperId")
             if p_id:
-                r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", params={"limit": limite_red, "fields": "title"}, timeout=15)
+                # Referencias y Citas
+                r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", params={"limit": limite_red, "fields": "title"}, timeout=12)
                 if r_res.status_code == 200:
                     refs = [i['citedPaper']['title'] for i in r_res.json().get('data', []) if i.get('citedPaper')]
                 
-                c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", params={"limit": limite_red, "fields": "title"}, timeout=15)
+                c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", params={"limit": limite_red, "fields": "title"}, timeout=12)
                 if c_res.status_code == 200:
                     cits = [i['citingPaper']['title'] for i in c_res.json().get('data', []) if i.get('citingPaper')]
     except: pass
@@ -116,33 +130,36 @@ def obtener_red_cached(doi, titulo, limite_red=5):
 
 # --- 3. INTERFAZ ---
 
-st.title("🚀 AcademiGraph Pro: High-Volume Edition")
+st.title("🌍 AcademiGraph Pro: Global Research Intelligence")
+st.markdown("Motores activos: **Dimensions (OpenAlex)**, **PubMed**, **CORE** y **Crossref**.")
 
 with st.sidebar:
-    st.header("⚙️ Control de Volumen")
-    perfil = st.selectbox("Perfil", ["General", "Derecho/Economía"])
-    # Aumentamos el límite a 25 por motor para llegar a 100+ en total
-    n_results = st.slider("Resultados por motor", 5, 25, 15)
+    st.header("⚙️ Configuración")
+    user_email = st.text_input("Email Investigador", "investigador@institucion.edu")
+    n_results = st.slider("Artículos base por motor", 5, 25, 10)
     st.divider()
-    st.warning("Nota: Buscar 100 resultados puede tardar hasta 3 minutos debido a los límites de las APIs.")
+    st.info("💡 Se han desactivado las fuentes locales para maximizar la conectividad del mapa.")
 
-query = st.text_input("Investigar materia:", placeholder="Ej: Energías renovables")
+query = st.text_input("Investigar materia:", placeholder="Ej: Machine Learning in Finance")
 
-if st.button("🚀 Iniciar Gran Búsqueda"):
+if st.button("🚀 Lanzar Investigación"):
     if query:
-        with st.status("Fase 1: Recolectando artículos de impacto...", expanded=True) as s:
-            data_base = buscar_federado_total(query, n_results, "investigador@uco.es", perfil)
-            s.write(f"✅ Se han localizado {len(data_base)} artículos base.")
+        with st.status("Consultando infraestructura científica global...", expanded=True) as s:
+            data_base = buscar_federado_global(query, n_results, user_email)
+            # Limpieza: Eliminamos resultados sin título
+            data_base = [d for d in data_base if d['Título']]
+            s.write(f"✅ Se han localizado {len(data_base)} artículos núcleo de alta relevancia.")
             
-            s.write("Fase 2: Mapeando conexiones (esto puede tardar)...")
             grafo = nx.DiGraph()
             progreso = st.progress(0)
             
             for i, art in enumerate(data_base):
-                # Usamos la versión con caché para acelerar
-                r_list, c_list = obtener_red_cached(art['DOI'], art['Título'], limite_red=5)
+                r_list, c_list = obtener_red_cached(art['DOI'], art['Título'])
                 
-                grafo.add_node(art['Título'], color='#4CAF50', size=30)
+                # Nodo central (con DOI tiene prioridad)
+                grafo.add_node(art['Título'], color='#4CAF50', size=30, title=f"DOI: {art['DOI']}")
+                
+                # Enlaces
                 for r in r_list:
                     grafo.add_node(r, color='#FF5722', size=15)
                     grafo.add_edge(art['Título'], r, color='#FF5722')
@@ -151,29 +168,27 @@ if st.button("🚀 Iniciar Gran Búsqueda"):
                     grafo.add_edge(c, art['Título'], color='#2196F3')
                 
                 progreso.progress((i + 1) / len(data_base))
-                # Pausa de seguridad para evitar bloqueos de IP
-                time.sleep(1.2)
+                time.sleep(1.1)
 
-            s.update(label="¡Procesamiento masivo completado!", state="complete")
+            s.update(label="¡Mapa de red bibliométrica completado!", state="complete")
 
-        # Visualización optimizada
+        # UI Visualización
         col_m, col_d = st.columns([2, 1])
         with col_m:
-            st.markdown(f"### 🕸️ Mapa de Citación ({len(grafo.nodes)} nodos)")
+            st.markdown(f"### 🕸️ Mapa de Impacto ({len(grafo.nodes)} artículos)")
             net = Network(height="750px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
             net.from_nx(grafo)
-            # Desactivamos la física compleja inicial para mejorar el rendimiento en redes grandes
             net.toggle_physics(True)
-            net.repulsion(node_distance=150, spring_length=150)
+            net.repulsion(node_distance=180)
             components.html(net.generate_html(), height=800)
 
         with col_d:
-            st.markdown("### 📊 Datos Ordenados")
+            st.markdown("### 📊 Ranking de Resultados")
             df = pd.DataFrame(data_base)
             if not df.empty:
                 df["Citas"] = pd.to_numeric(df["Citas"], errors='coerce').fillna(0).astype(int)
                 df_sorted = df.sort_values(by="Citas", ascending=False)
                 st.dataframe(df_sorted, use_container_width=True)
-                st.download_button("📥 Descargar CSV", df_sorted.to_csv(index=False).encode('utf-8'), "big_search.csv")
+                st.download_button("📥 Exportar Informe", df_sorted.to_csv(index=False).encode('utf-8'), "reporte_global.csv")
     else:
-        st.warning("Introduce un término.")
+        st.warning("Escribe un término para iniciar.")
