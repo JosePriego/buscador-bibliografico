@@ -9,21 +9,21 @@ import pandas as pd
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="AcademiGraph Pro | Buscador Científico", 
+    page_title="AcademiGraph Pro | Explorer", 
     layout="wide", 
     page_icon="🎓"
 )
 
-# --- ESTILO VISUAL ---
+# --- DISEÑO DE INTERFAZ ---
 st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: #ffffff; }
-    .stButton>button { width: 100%; border-radius: 8px; background-color: #2e7bcf; color: white; border: none; }
+    .stButton>button { width: 100%; border-radius: 8px; background-color: #2e7bcf; color: white; border: none; font-weight: bold; }
     .stDownloadButton>button { width: 100%; border-radius: 8px; background-color: #1c83e1; color: white; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 1. MOTORES DE BÚSQUEDA ---
+# --- 1. MOTORES DE BÚSQUEDA (FEDERADOS) ---
 
 def buscar_federado(materia, limite, email):
     resultados = []
@@ -31,7 +31,7 @@ def buscar_federado(materia, limite, email):
     def buscar_oa():
         try:
             res = requests.get("https://api.openalex.org/works", 
-                               params={"search": materia, "per-page": limite, "mailto": email}, timeout=10)
+                               params={"search": materia, "per-page": limite, "mailto": email}, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("results", []):
                     doi_url = item.get("doi")
@@ -45,7 +45,7 @@ def buscar_federado(materia, limite, email):
     def buscar_cr():
         try:
             res = requests.get("https://api.crossref.org/works", 
-                               params={"query": materia, "rows": limite, "mailto": email}, timeout=10)
+                               params={"query": materia, "rows": limite, "mailto": email}, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("message", {}).get("items", []):
                     autores = item.get("author", [])
@@ -60,7 +60,7 @@ def buscar_federado(materia, limite, email):
         try:
             url = "https://mezquita.uco.es/primaws/rest/pub/pnxs"
             params = {"q": f"any,contains,{materia}", "limit": limite, "vid": "34CBUA_UCO:VU1", "tab": "Everything", "scope": "MyInst_and_CI", "inst": "34CBUA_UCO"}
-            res = requests.get(url, params=params, timeout=10)
+            res = requests.get(url, params=params, timeout=15)
             if res.status_code == 200:
                 for item in res.json().get("docs", []):
                     pnx = item.get("pnx", {})
@@ -81,21 +81,29 @@ def buscar_federado(materia, limite, email):
 
 # --- 2. MOTOR DE RED (BIDIRECCIONAL) ---
 
-def obtener_red_ss(doi, titulo, limite_red=3):
+def obtener_red_completa(doi, titulo, limite_red=5):
     refs, cits = [], []
     try:
-        url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1"
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
+        # 1. Identificar el artículo en Semantic Scholar
+        url_id = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1"
+        res_id = requests.get(url_id, timeout=10)
+        
+        if res_id.status_code == 200:
+            data = res_id.json()
             p_id = data.get("paperId") if doi else data.get("data", [{}])[0].get("paperId")
+            
             if p_id:
-                # Referencias (Pasado)
-                r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", params={"limit":limite_red, "fields":"title"}, timeout=10)
+                # 2. REFERENCIAS (Pasado - Salen del nodo)
+                r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", 
+                                     params={"limit": limite_red, "fields": "title"}, timeout=10)
                 if r_res.status_code == 200:
                     refs = [i['citedPaper']['title'] for i in r_res.json().get('data', []) if i.get('citedPaper')]
-                # Citas (Futuro)
-                c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", params={"limit":limite_red, "fields":"title"}, timeout=10)
+                
+                time.sleep(0.6) # Evitar bloqueos de API
+
+                # 3. CITAS (Futuro - Entran al nodo)
+                c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", 
+                                     params={"limit": limite_red, "fields": "title"}, timeout=10)
                 if c_res.status_code == 200:
                     cits = [i['citingPaper']['title'] for i in c_res.json().get('data', []) if i.get('citingPaper')]
     except: pass
@@ -104,70 +112,80 @@ def obtener_red_ss(doi, titulo, limite_red=3):
 # --- 3. INTERFAZ STREAMLIT ---
 
 st.title("🎓 AcademiGraph Pro")
-st.markdown("Busca literatura científica y visualiza redes de citación bidireccionales.")
+st.markdown("Herramienta de investigación federada con mapeo bibliométrico bidireccional.")
 
 with st.sidebar:
-    st.header("⚙️ Parámetros")
-    user_email = st.text_input("Email (Polite Pool)", "investigador@ejemplo.com")
-    n_results = st.slider("Resultados por buscador", 1, 10, 5)
+    st.header("⚙️ Configuración")
+    user_email = st.text_input("Email (Polite Pool)", "investigador@institucion.edu")
+    n_results = st.slider("Resultados base por fuente", 1, 10, 5)
     st.divider()
-    st.info("Conectado a OpenAlex, Crossref, UCO y Semantic Scholar.")
+    st.markdown("""
+    **Leyenda del Mapa:**
+    - 🟢 **Verde:** Artículos encontrados.
+    - 🔴 **Rojo:** Referencias (Pasado).
+    - 🔵 **Azul:** Citas recibidas (Futuro).
+    """)
 
-query = st.text_input("Introduce el tema de investigación:", placeholder="Ej: Energías renovables en Córdoba")
+query = st.text_input("Introduce tu término de búsqueda:", placeholder="Ej: Cambio climático en el Mediterráneo")
 
-if st.button("🚀 Iniciar Investigación"):
+if st.button("🚀 Ejecutar Investigación"):
     if query:
         # FASE 1: BÚSQUEDA
-        with st.status("Consultando fuentes federadas...", expanded=True) as s:
+        with st.status("Consultando bases de datos...", expanded=True) as s:
             data_base = buscar_federado(query, n_results, user_email)
-            s.write(f"✅ {len(data_base)} artículos base encontrados.")
+            s.write(f"✅ Se han localizado {len(data_base)} artículos principales.")
             
             # FASE 2: CONSTRUCCIÓN DE RED
-            s.write("Mapeando conexiones científicas...")
+            s.write("Generando red de citación bidireccional...")
             grafo = nx.DiGraph()
             progreso = st.progress(0)
             
             for i, art in enumerate(data_base):
-                r_list, c_list = obtener_red_ss(art['DOI'], art['Título'])
+                refs, cits = obtener_red_completa(art['DOI'], art['Título'])
                 
-                # Nodo central (Verde)
-                grafo.add_node(art['Título'], color='#4CAF50', size=25)
+                # Nodo base (CENTRAL)
+                grafo.add_node(art['Título'], color='#4CAF50', size=30, title=f"Fuente: {art['Fuente']}")
                 
-                for r in r_list:
-                    grafo.add_node(r, color='#ff4b4b', size=15) # Referencias (Rojo)
-                    grafo.add_edge(art['Título'], r)
-                for c in c_list:
-                    grafo.add_node(c, color='#00aaff', size=15) # Citas (Azul)
-                    grafo.add_edge(c, art['Título'])
+                # Agregar Referencias (Flecha: Art -> Referencia)
+                for r in refs:
+                    grafo.add_node(r, color='#FF5722', size=15)
+                    grafo.add_edge(art['Título'], r, color='#FF5722', label="referencia")
+                
+                # Agregar Citas (Flecha: Citador -> Art)
+                for c in cits:
+                    grafo.add_node(c, color='#2196F3', size=15)
+                    grafo.add_edge(c, art['Título'], color='#2196F3', label="cita")
                 
                 progreso.progress((i + 1) / len(data_base))
-                time.sleep(1) # Respetar Rate Limit de Semantic Scholar
+                time.sleep(1) # Respetar rate limit de APIs
 
-            s.update(label="Análisis finalizado", state="complete")
+            s.update(label="¡Análisis bibliométrico listo!", state="complete")
 
         # FASE 3: VISUALIZACIÓN
-        col_m, col_t = st.columns([2, 1])
+        col_map, col_data = st.columns([2, 1])
         
-        with col_m:
-            st.markdown("### 🕸️ Mapa de Citación")
-            net = Network(height="650px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
+        with col_map:
+            st.markdown("### 🕸️ Mapa Interactivo")
+            net = Network(height="700px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
             net.from_nx(grafo)
-            net.repulsion(node_distance=200, spring_length=200)
+            net.repulsion(node_distance=200, spring_length=200, spring_strength=0.05)
             
-            # Generar HTML y mostrarlo
+            # Generación del HTML
             net_html = net.generate_html()
-            components.html(net_html, height=700)
+            components.html(net_html, height=750)
 
-        with col_t:
-            st.markdown("### 📄 Tabla de Datos")
+        with col_data:
+            st.markdown("### 📄 Resultados")
             df = pd.DataFrame(data_base)
             st.dataframe(df, use_container_width=True)
             
+            # Botón de descarga
+            csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Descargar CSV",
-                data=df.to_csv(index=False).encode('utf-8'),
+                label="📥 Descargar CSV de Resultados",
+                data=csv,
                 file_name=f"investigacion_{query.replace(' ','_')}.csv",
                 mime="text/csv"
             )
     else:
-        st.warning("Escribe algo antes de buscar.")
+        st.warning("Por favor, introduce una materia para buscar.")
