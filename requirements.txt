@@ -3,3 +3,4 @@ requests
 networkx
 pyvis
 pandas
+openpyxl
