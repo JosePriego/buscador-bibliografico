@@ -25,7 +25,7 @@ st.markdown("""
 
 # --- CARGA DE SECRETOS ---
 try:
-    SCOPUS_API_KEY = st.secrets["SCOPUS_KEY"][cite: 1]
+    SCOPUS_KEY = st.secrets["SCOPUS_KEY"][cite: 1]
 except Exception:
     st.error("❌ Error: No se encontró 'SCOPUS_KEY' en los Secretos de Streamlit.")
     st.stop()
