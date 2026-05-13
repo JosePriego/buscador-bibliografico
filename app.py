@@ -5,125 +5,163 @@ import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
 import pandas as pd
+import time
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="AcademiGraph Pro | Data Export", layout="wide", page_icon="🎓")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="AcademiGraph Pro | Scopus Edition", layout="wide", page_icon="🎓")
 
-# --- MOTORES DE BÚSQUEDA (Simplificado para brevedad, igual al anterior) ---
+# Estilo profesional
+st.markdown("""
+    <style>
+    .stApp { background-color: #0e1117; color: #ffffff; }
+    .stButton>button { width: 100%; border-radius: 8px; background: linear-gradient(90deg, #ffb347, #ffcc33); color: black; font-weight: bold; border: none; }
+    .stDownloadButton>button { width: 100%; border-radius: 8px; background-color: #2e7bcf; color: white; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- MOTORES DE BÚSQUEDA ---
+
 class AcademicEngine:
-    def __init__(self, email, perfil):
+    def __init__(self, email, scopus_key=None):
         self.email = email
-        self.perfil = perfil
+        self.scopus_key = scopus_key
+        self.headers_scopus = {
+            "X-ELS-APIKey": scopus_key,
+            "Accept": "application/json"
+        }
 
-    def fetch_all(self, query, limite, campo):
-        # Aquí irían las funciones fetch_openalex, fetch_pubmed, etc. 
-        # (Se asume la lógica previa de búsqueda federada)
-        return [] 
+    def fetch_scopus(self, query, limite, campo):
+        if not self.scopus_key: return []
+        try:
+            # Sintaxis Scopus: TITLE-ABS-KEY para búsqueda general
+            q = f"TITLE({query})" if campo == "Título" else f"AUTHOR-NAME({query})" if campo == "Autor" else f"TITLE-ABS-KEY({query})"
+            url = "https://api.elsevier.com/content/search/scopus"
+            res = requests.get(url, headers=self.headers_scopus, params={"query": q, "count": limite}, timeout=10)
+            if res.status_code == 200:
+                entries = res.json().get("search-results", {}).get("entry", [])
+                return [{
+                    "Fuente": "Scopus", "Título": i.get("dc:title"),
+                    "Autor": i.get("dc:creator", "N/A"),
+                    "DOI": i.get("prism:doi"), "Citas": int(i.get("citedby-count", 0))
+                } for i in entries if i.get("dc:title")]
+        except: pass
+        return []
 
-# --- FUNCIÓN CLAVE: OBTENER RED Y ESTRUCTURAR DATOS ---
+    def fetch_openalex(self, query, limite):
+        try:
+            res = requests.get("https://api.openalex.org/works", params={"search": query, "per-page": limite, "mailto": self.email}, timeout=10)
+            return [{
+                "Fuente": "OpenAlex", "Título": i.get("title"),
+                "Autor": i.get("authorships", [{}])[0].get("author", {}).get("display_name", "N/A"),
+                "DOI": i.get("doi", "").replace("https://doi.org/", ""), "Citas": i.get("cited_by_count", 0)
+            } for i in res.json().get("results", [])]
+        except: return []
+
+# --- ENRIQUECIMIENTO DE RED (Semantic Scholar) ---
+
 @st.cache_data(ttl=3600)
-def obtener_metadatos_completos(doi, titulo, limit=5):
+def get_paper_network(doi, titulo, limit=5):
+    """Obtiene el conteo real de citas, referencias (rojo) y citas recibidas (azul)."""
     try:
         url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1&fields=citationCount,paperId"
-        res = requests.get(url, timeout=8).json()
-        data = res if doi else res.get("data", [{}])[0]
-        paper_id = data.get("paperId")
+        data = requests.get(url, timeout=8).json()
+        paper = data if doi else data.get("data", [{}])[0]
+        p_id = paper.get("paperId")
         
-        refs, cits = [], []
-        if paper_id:
-            base_url = f"https://api.semanticscholar.org/graph/v1/paper/{paper_id}"
-            r_data = requests.get(f"{base_url}/references", params={"limit": limit, "fields": "title"}, timeout=5).json()
-            c_data = requests.get(f"{base_url}/citations", params={"limit": limit, "fields": "title"}, timeout=5).json()
-            refs = [r['citedPaper']['title'] for r in r_data.get('data', []) if r.get('citedPaper')]
-            cits = [c['citingPaper']['title'] for c in c_data.get('data', []) if c.get('citingPaper')]
-        return data.get("citationCount", 0), refs, cits
+        if not p_id: return paper.get("citationCount", 0), [], []
+        
+        # Referencias y Citas
+        r_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/references", params={"limit": limit, "fields": "title"}).json()
+        c_res = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/{p_id}/citations", params={"limit": limit, "fields": "title"}).json()
+        
+        refs = [i['citedPaper']['title'] for i in r_res.get('data', []) if i.get('citedPaper')]
+        cits = [i['citingPaper']['title'] for i in c_res.get('data', []) if i.get('citingPaper')]
+        return paper.get("citationCount", 0), refs, cits
     except: return 0, [], []
 
 # --- INTERFAZ ---
-st.title("🎓 AcademiGraph Pro: Inteligencia y Exportación")
+
+st.title("🎓 AcademiGraph Pro: Edición Scopus")
 
 with st.sidebar:
-    st.header("⚙️ Configuración")
-    user_email = st.text_input("Email", "investigador@institucion.edu")
-    n_results = st.slider("Artículos Base", 5, 20, 10)
-    st.info("Ahora el CSV incluirá la genealogía completa (Antecedentes y Citas).")
+    st.header("🔑 Acceso API")
+    scopus_key = st.text_input("Scopus API Key", type="password", help="Introduce tu clave de Elsevier")
+    user_email = st.text_input("Email (Polite Pool)", "investigador@institucion.edu")
+    st.divider()
+    n_results = st.slider("Artículos base", 5, 20, 10)
+    st.caption("Nota: Scopus suele requerir conexión VPN institucional.")
 
-query = st.text_input("Término de búsqueda:")
+query = st.text_input("Término de búsqueda académica:", placeholder="Ej: Blockchain in healthcare")
 
-if st.button("🚀 Iniciar Mapeo"):
-    if query:
-        # 1. Simulación de búsqueda (aquí llamarías a tus motores OA, Crossref, etc.)
-        # Para este ejemplo, supongamos que 'data_base' son tus resultados verdes
-        data_base = [] # ... resultados de los motores ...
-
-        with st.status("Construyendo base de datos expandida...", expanded=True) as status:
-            G = nx.DiGraph()
-            lista_para_csv = [] # AQUÍ GUARDAREMOS TODO
+if st.button("🚀 Iniciar Investigación"):
+    if not query:
+        st.warning("Introduce un término de búsqueda.")
+    elif not scopus_key:
+        st.error("Se requiere una API Key de Scopus para esta versión.")
+    else:
+        engine = AcademicEngine(user_email, scopus_key)
+        
+        with st.status("📡 Consultando bases de datos de alto impacto...", expanded=True) as s:
+            # 1. Búsqueda en paralelo
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                f_sc = executor.submit(engine.fetch_scopus, query, n_results, "General")
+                f_oa = executor.submit(engine.fetch_openalex, query, n_results)
+                raw_results = f_sc.result() + f_oa.result()
             
-            for art in data_base:
-                citas_r, refs, cits = obtener_metadatos_completos(art['DOI'], art['Título'])
+            # Deduplicación
+            vistos, data_unicos = set(), []
+            for item in raw_results:
+                t = item['Título'].lower().strip()
+                if t not in vistos:
+                    vistos.add(t); data_unicos.append(item)
+            
+            s.write(f"✅ {len(data_unicos)} artículos encontrados. Generando red genealógica...")
+            
+            # 2. Construcción del Grafo y Lista Maestra
+            G = nx.DiGraph()
+            export_list = []
+            
+            for art in data_unicos:
+                citas_reales, refs, cits = get_paper_network(art['DOI'], art['Título'])
                 
-                # AÑADIR ARTÍCULO PRINCIPAL AL CSV
-                lista_para_csv.append({
-                    "Título": art['Título'],
-                    "Relación": "PRINCIPAL (Resultado de búsqueda)",
-                    "Origen": art['Fuente'],
-                    "Vinculado a": "N/A"
-                })
-
-                # AÑADIR REFERENCIAS (ANTECEDENTES) AL CSV Y GRAFO
+                # Nodo Principal (Verde)
+                G.add_node(art['Título'], color='#4CAF50', size=30, title=f"Fuente: {art['Fuente']} | Citas: {citas_reales}")
+                export_list.append({"Título": art['Título'], "Tipo": "PRINCIPAL", "Relación con": "N/A", "Fuente": art['Fuente']})
+                
+                # Referencias (Rojo)
                 for r in refs:
-                    lista_para_csv.append({
-                        "Título": r,
-                        "Relación": "REFERENCIA (Antecedente)",
-                        "Origen": "Semantic Scholar",
-                        "Vinculado a": art['Título']
-                    })
-                    G.add_node(r, color='#FF5722', title="Referencia")
+                    G.add_node(r, color='#FF5722', size=15, title="Referencia (Antecedente)")
                     G.add_edge(art['Título'], r, color='#FF5722')
-
-                # AÑADIR CITAS (IMPACTO) AL CSV Y GRAFO
-                for c in cits:
-                    lista_para_csv.append({
-                        "Título": c,
-                        "Relación": "CITA (Impacto futuro)",
-                        "Origen": "Semantic Scholar",
-                        "Vinculado a": art['Título']
-                    })
-                    G.add_node(c, color='#2196F3', title="Cita")
-                    G.add_edge(c, art['Título'], color='#2196F3')
+                    export_list.append({"Título": r, "Tipo": "REFERENCIA", "Relación con": art['Título'], "Fuente": "Semantic Scholar"})
                 
-                G.add_node(art['Título'], color='#4CAF50', size=25)
-
-            st.session_state.full_data = lista_para_csv
+                # Citas (Azul)
+                for c in cits:
+                    G.add_node(c, color='#2196F3', size=15, title="Cita (Impacto futuro)")
+                    G.add_edge(c, art['Título'], color='#2196F3')
+                    export_list.append({"Título": c, "Tipo": "CITA", "Relación con": art['Título'], "Fuente": "Semantic Scholar"})
+            
             st.session_state.grafo = G
-            status.update(label="Análisis y lista de descarga listos.", state="complete")
+            st.session_state.export_data = export_list
+            s.update(label="¡Mapeo completo!", state="complete")
 
-# --- RENDERIZADO Y DESCARGA ---
-if 'full_data' in st.session_state:
-    df_export = pd.DataFrame(st.session_state.full_data)
+# --- VISUALIZACIÓN Y DESCARGA ---
+if 'grafo' in st.session_state:
+    c1, c2 = st.columns([2, 1])
     
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.subheader("🌐 Visualización Dinámica")
+    with c1:
         net = Network(height="600px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
         net.from_nx(st.session_state.grafo)
+        net.toggle_physics(True)
         components.html(net.generate_html(), height=650)
-
-    with col2:
-        st.subheader("💾 Descargar Resultados")
-        st.write(f"Se han procesado **{len(df_export)}** registros en total (incluyendo red de citas).")
         
-        # Botón para descargar TODO
-        csv_full = df_export.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Descargar RED COMPLETA (CSV)",
-            data=csv_full,
-            file_name="red_academica_completa.csv",
-            mime="text/csv",
-            help="Descarga el listado de artículos base, sus referencias y sus citas."
-        )
+    with c2:
+        st.subheader("📊 Exportación Total")
+        df = pd.DataFrame(st.session_state.export_data)
+        st.write(f"Registros en red: **{len(df)}**")
+        
+        # El CSV ahora contiene TODA la red (verdes, rojos y azules)
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Descargar Red Completa (CSV)", csv, "red_academica_pro.csv", "text/csv")
         
         st.divider()
-        st.dataframe(df_export, height=400)
+        st.dataframe(df, height=400)
