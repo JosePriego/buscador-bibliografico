@@ -24,12 +24,13 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- VALIDACIÓN DE SECRETOS (VÍA PROFESIONAL) ---
-try:
-    # Intenta leer la clave desde .streamlit/secrets.toml (local) o desde el panel de Streamlit (nube)
-    SCOPUS_API_KEY = st.secrets["SCOPUS_KEY"]
-except Exception:
-    st.error("❌ Error: No se encontró la 'SCOPUS_KEY'. Configúrala en el panel de Secrets de Streamlit o en tu archivo local.")
+# Borra el try/except anterior y pon esto:
+if "SCOPUS_KEY" not in st.secrets:
+    st.write("### 🔍 Diagnóstico de Secretos")
+    st.write("Streamlit no encuentra 'SCOPUS_KEY', pero sí encuentra estas llaves:", list(st.secrets.keys()))
     st.stop()
+else:
+    SCOPUS_API_KEY = st.secrets["SCOPUS_KEY"]
 
 # --- CLASE DE MOTORES DE BÚSQUEDA ---
 
