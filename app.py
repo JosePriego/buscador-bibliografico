@@ -9,12 +9,12 @@ import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="AcademiGraph Pro | Scopus & Excel Edition", 
+    page_title="AcademiGraph Pro | GitHub Edition", 
     layout="wide", 
     page_icon="🎓"
 )
 
-# Estilos visuales
+# Estilos visuales personalizados
 st.markdown("""
     <style>
     .stApp { background-color: #0e1117; color: #ffffff; }
@@ -23,10 +23,18 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- VALIDACIÓN DE SECRETOS (VÍA PROFESIONAL) ---
+try:
+    # Intenta leer la clave desde .streamlit/secrets.toml (local) o desde el panel de Streamlit (nube)
+    SCOPUS_API_KEY = st.secrets["SCOPUS_KEY"]
+except Exception:
+    st.error("❌ Error: No se encontró la 'SCOPUS_KEY'. Configúrala en el panel de Secrets de Streamlit o en tu archivo local.")
+    st.stop()
+
 # --- CLASE DE MOTORES DE BÚSQUEDA ---
 
 class AcademicEngine:
-    def __init__(self, email, scopus_key=None):
+    def __init__(self, email, scopus_key):
         self.email = email
         self.scopus_key = scopus_key
         self.headers_scopus = {
@@ -35,9 +43,8 @@ class AcademicEngine:
         }
 
     def fetch_scopus(self, query, limite):
-        if not self.scopus_key: return []
+        """Busca directamente en Scopus usando la API Key segura."""
         try:
-            # Búsqueda general en Scopus (Título, Resumen, Palabras clave)
             url = "https://api.elsevier.com/content/search/scopus"
             params = {"query": f"TITLE-ABS-KEY({query})", "count": limite}
             res = requests.get(url, headers=self.headers_scopus, params=params, timeout=10)
@@ -54,6 +61,7 @@ class AcademicEngine:
         return []
 
     def fetch_openalex(self, query, limite):
+        """Motor complementario OpenAlex para mayor cobertura."""
         try:
             url = "https://api.openalex.org/works"
             params = {"search": query, "per-page": limite, "mailto": self.email}
@@ -68,11 +76,11 @@ class AcademicEngine:
                 } for i in res.json().get("results", [])]
         except: return []
 
-# --- FUNCIÓN DE RED (SEMANTIC SCHOLAR) ---
+# --- MOTOR DE RED (SEMANTIC SCHOLAR) ---
 
 @st.cache_data(ttl=3600)
-def expandir_red(doi, titulo, limit=5):
-    """Utiliza Semantic Scholar para obtener el ADN del artículo (Referencias y Citas)."""
+def expandir_red_bibliografica(doi, titulo, limit=5):
+    """Mapea las conexiones (referencias y citas) de cada artículo[cite: 1]."""
     try:
         url = f"https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}" if doi else f"https://api.semanticscholar.org/graph/v1/paper/search?query={titulo}&limit=1&fields=citationCount,paperId"
         res = requests.get(url, timeout=8).json()
@@ -81,107 +89,104 @@ def expandir_red(doi, titulo, limit=5):
         
         if not p_id: return paper.get("citationCount", 0), [], []
         
-        # Consultar Referencias (Rojo) y Citas (Azul)
-        base = f"https://api.semanticscholar.org/graph/v1/paper/{p_id}"
-        r_data = requests.get(f"{base}/references", params={"limit": limit, "fields": "title"}).json()
-        c_data = requests.get(f"{base}/citations", params={"limit": limit, "fields": "title"}).json()
+        base_url = f"https://api.semanticscholar.org/graph/v1/paper/{p_id}"
+        # Referencias (Rojo) y Citas (Azul)
+        r_data = requests.get(f"{base_url}/references", params={"limit": limit, "fields": "title"}).json()
+        c_data = requests.get(f"{base_url}/citations", params={"limit": limit, "fields": "title"}).json()
         
         refs = [i['citedPaper']['title'] for i in r_data.get('data', []) if i.get('citedPaper')]
         cits = [i['citingPaper']['title'] for i in c_data.get('data', []) if i.get('citingPaper')]
         return paper.get("citationCount", 0), refs, cits
     except: return 0, [], []
 
-# --- INTERFAZ DE USUARIO ---
+# --- INTERFAZ PRINCIPAL ---
 
 st.title("🎓 AcademiGraph Pro")
-st.subheader("Inteligencia Bibliométrica con Scopus y Exportación Excel")
+st.markdown("### Inteligencia Bibliométrica con Scopus y Exportación Excel")
 
 with st.sidebar:
-    st.header("🔑 Configuración")
-    scopus_api_key = st.text_input("Scopus API Key", type="password")
-    user_email = st.text_input("Email de contacto", "investigador@institucion.edu")
-    n_results = st.slider("Resultados base por motor", 5, 25, 10)
-    st.info("El sistema usará Scopus para la búsqueda y Semantic Scholar para mapear la red.")
+    st.header("⚙️ Configuración")
+    user_email = st.text_input("Email (Polite Pool)", "investigador@institucion.edu")
+    n_results = st.slider("Resultados base por motor", 5, 30, 12)
+    st.divider()
+    st.success("✅ Conectado a Scopus vía Secretos")
 
-query = st.text_input("Introduce tu tema de investigación:")
+query = st.text_input("Introduce el tema de investigación:", placeholder="Ej: Artificial Intelligence in Education")
 
-if st.button("🚀 Lanzar Investigación"):
-    if not query or not scopus_api_key:
-        st.error("Por favor, introduce el término de búsqueda y tu API Key de Scopus.")
-    else:
-        engine = AcademicEngine(user_email, scopus_api_key)
+if st.button("🚀 Iniciar Investigación"):
+    if query:
+        engine = AcademicEngine(user_email, SCOPUS_API_KEY)
         
-        with st.status("🕵️ Investigando en Scopus y OpenAlex...", expanded=True) as status:
-            # 1. Búsqueda paralela
+        with st.status("🔍 Consultando bases de datos globales...", expanded=True) as status:
+            # 1. Búsqueda concurrente
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 f_sc = executor.submit(engine.fetch_scopus, query, n_results)
                 f_oa = executor.submit(engine.fetch_openalex, query, n_results)
-                raw_results = f_sc.result() + f_oa.result()
+                raw_data = f_sc.result() + f_oa.result()
             
-            # 2. Deduplicación por título
+            # 2. Deduplicación
             vistos, unicos = set(), []
-            for item in raw_results:
+            for item in raw_data:
                 t = item['Título'].lower().strip()
                 if t not in vistos:
                     vistos.add(t); unicos.append(item)
             
-            status.write(f"✅ {len(unicos)} artículos base encontrados. Mapeando conexiones...")
+            status.write(f"✅ Se encontraron {len(unicos)} artículos base. Construyendo red genealógica...")
 
-            # 3. Construcción de Red y Datos
+            # 3. Mapeo de Grafo y Datos de Exportación
             G = nx.DiGraph()
-            final_data = []
+            export_data = []
             
             for art in unicos:
-                citas_val, refs, cits = expandir_red(art['DOI'], art['Título'])
+                c_val, refs, cits = expandir_red_bibliografica(art['DOI'], art['Título'])
                 
-                # Nodo Principal (Verde)
-                G.add_node(art['Título'], color='#4CAF50', size=30, title=f"Fuente: {art['Fuente']}")
-                final_data.append({"Título": art['Título'], "Relación": "PRINCIPAL", "Fuente": art['Fuente'], "Conectado a": "N/A"})
+                # Nodo Principal
+                G.add_node(art['Título'], color='#4CAF50', size=30, title=f"Origen: {art['Fuente']}")
+                export_data.append({"Título": art['Título'], "Relación": "PRINCIPAL", "Fuente": art['Fuente'], "Vínculo": "Búsqueda Directa"})
                 
-                # Antecedentes (Rojo)
+                # Nodos de Referencia (Pasado)
                 for r in refs:
                     G.add_node(r, color='#FF5722', size=15)
                     G.add_edge(art['Título'], r, color='#FF5722')
-                    final_data.append({"Título": r, "Relación": "REFERENCIA (Pasado)", "Fuente": "Semantic Scholar", "Conectado a": art['Título']})
+                    export_data.append({"Título": r, "Relación": "REFERENCIA", "Fuente": "Semantic Scholar", "Vínculo": art['Título']})
                 
-                # Impacto (Azul)
+                # Nodos de Cita (Futuro)
                 for c in cits:
                     G.add_node(c, color='#2196F3', size=15)
                     G.add_edge(c, art['Título'], color='#2196F3')
-                    final_data.append({"Título": c, "Relación": "CITA (Futuro)", "Fuente": "Semantic Scholar", "Conectado a": art['Título']})
+                    export_data.append({"Título": c, "Relación": "CITA", "Fuente": "Semantic Scholar", "Vínculo": art['Título']})
             
             st.session_state.grafo = G
-            st.session_state.data_export = final_data
-            status.update(label="¡Investigación completada!", state="complete")
+            st.session_state.data_export = export_data
+            status.update(label="¡Análisis completado!", state="complete")
 
 # --- RENDERIZADO DE RESULTADOS ---
 
 if 'grafo' in st.session_state:
-    col_graph, col_stats = st.columns([2, 1])
+    col_map, col_table = st.columns([2, 1])
     
-    with col_graph:
-        st.markdown("### 🌐 Mapa de Relaciones Académicas")
-        net = Network(height="600px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
+    with col_map:
+        st.subheader("🌐 Visualización de la Red")
+        net = Network(height="650px", width="100%", bgcolor="#0e1117", font_color="white", directed=True)
         net.from_nx(st.session_state.grafo)
         net.toggle_physics(True)
-        components.html(net.generate_html(), height=650)
+        components.html(net.generate_html(), height=700)
         
-    with col_stats:
-        st.markdown("### 📥 Exportar Resultados")
+    with col_table:
+        st.subheader("📊 Reporte de Datos")
         df = pd.DataFrame(st.session_state.data_export)
         
-        # Conversión a Excel en memoria
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Exportación a Excel nativo[cite: 1]
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Red_Academica')
         
         st.download_button(
-            label="📊 Descargar Red Completa (Excel)",
-            data=output.getvalue(),
-            file_name=f"Investigacion_{query.replace(' ', '_')}.xlsx",
+            label="📥 Descargar Base de Datos (.xlsx)",
+            data=buffer.getvalue(),
+            file_name=f"Red_{query.replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
         st.divider()
-        st.write("**Vista previa de los datos:**")
-        st.dataframe(df, height=400)
+        st.dataframe(df, height=500)
